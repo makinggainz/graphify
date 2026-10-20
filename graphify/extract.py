@@ -3909,6 +3909,10 @@ def _rewire_unique_stub_nodes(nodes: list[dict], edges: list[dict]) -> None:
         if not key:
             continue
         if node.get("source_file"):
+            if node.get("_swift_extension_only"):
+                # An unmerged Swift extension of an outside type keeps its
+                # members but is not the type's definition (#4574).
+                continue
             if _is_type_like_definition(node):
                 # Match stubs case-SENSITIVELY: a `Path` reference must not rewire to a
                 # `PATH` env var (#1581). Fold only for genuinely case-insensitive
@@ -4112,16 +4116,22 @@ def _merge_swift_extensions(
     `extension Foo`, and node ids carry the file stem, so each file that
     extends `Foo` produces its own `Foo` node. The match is done by label:
     when exactly one non-extension declaration shares the label, extension
-    nodes redirect onto it. Extensions of types outside the corpus (no match)
-    and ambiguous labels (more than one match) are left untouched — picking
-    arbitrarily would invent edges.
+    nodes redirect onto it. A file that declares `struct Foo` and also extends
+    it shares one id for both, and that node is a declaration, not an
+    extension (#4574). Extensions of types outside the corpus (no match) and
+    ambiguous labels (more than one match) are not merged — picking
+    arbitrarily would invent edges — and are marked `_swift_extension_only`,
+    so the stub rewire never takes `extension String` for `String` itself.
     """
     extension_nids: set[str] = set()
     extension_labels: dict[str, str] = {}
+    declared_nids: set[str] = set()
     for result in per_file:
         for ext in result.get("swift_extensions", []) or []:
             extension_nids.add(ext["nid"])
             extension_labels[ext["nid"]] = ext["label"]
+            if ext.get("declared"):
+                declared_nids.add(ext["nid"])
 
     if not extension_nids:
         return
@@ -4134,7 +4144,7 @@ def _merge_swift_extensions(
 
     label_to_canonical: dict[str, list[str]] = {}
     for n in all_nodes:
-        if n.get("id") in extension_nids:
+        if n.get("id") in extension_nids and n.get("id") not in declared_nids:
             continue
         label = n.get("label")
         if not label:
@@ -4154,13 +4164,19 @@ def _merge_swift_extensions(
         label_to_canonical.setdefault(label, []).append(n["id"])
 
     remap: dict[str, str] = {}
-    for ext_nid in extension_nids:
+    for ext_nid in extension_nids - declared_nids:
         candidates = label_to_canonical.get(extension_labels[ext_nid], [])
         if len(candidates) != 1:
             continue
         canonical_nid = candidates[0]
         if canonical_nid != ext_nid:
             remap[ext_nid] = canonical_nid
+
+    unmerged = extension_nids - declared_nids - set(remap)
+    if unmerged:
+        for n in all_nodes:
+            if n.get("id") in unmerged:
+                n["_swift_extension_only"] = True
 
     if not remap:
         return

@@ -5931,6 +5931,10 @@ def _extract_generic(
     # extensions don't (file stem is part of the id), so they're collected here
     # for a corpus-level merge after every file has been parsed.
     swift_extensions: list[dict] = []
+    # Ids of the Swift types this file genuinely declares (class/struct/enum/
+    # actor/protocol). A same-file `extension Foo` shares `struct Foo`'s id, so
+    # the merge needs this to tell a declared type from an extension-only node.
+    swift_declared_type_ids: set[str] = set()
     # C# type id -> its name within the namespace, enclosing types first
     # (`` Outer`1.Inner ``). Partial types carry it as `type_path` so the
     # corpus-level partial merge can key nested and generic halves exactly.
@@ -6332,10 +6336,11 @@ def _extract_generic(
                 _ts_emit_decorator_edges(node, class_nid, stem, source,
                                          ensure_named_node, add_edge)
 
-            if config.ts_module == "tree_sitter_swift" and any(
-                c.type == "extension" for c in node.children
-            ):
-                swift_extensions.append({"nid": class_nid, "label": class_name})
+            if config.ts_module == "tree_sitter_swift":
+                if any(c.type == "extension" for c in node.children):
+                    swift_extensions.append({"nid": class_nid, "label": class_name})
+                else:
+                    swift_declared_type_ids.add(class_nid)
 
             # Python-specific: inheritance
             if config.ts_module == "tree_sitter_python":
@@ -10218,6 +10223,10 @@ def _extract_generic(
                     # guard excludes these to avoid false edges (#2137).
                     n["_callable_class"] = True
     if swift_extensions:
+        for ext in swift_extensions:
+            # `declared`: this file also declares the type itself (#4574).
+            if ext["nid"] in swift_declared_type_ids:
+                ext["declared"] = True
         result["swift_extensions"] = swift_extensions
     # TS/JS: augment the constructor-injection type table with local `new`
     # bindings and type-annotated parameters, so `const s = new Svc(); s.m()` and
