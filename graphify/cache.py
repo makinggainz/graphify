@@ -1,3 +1,4 @@
+# Modified in the makinggainz/graphify fork, 2026-10-19 (AST cache schema 18); see FORK.md.
 # per-file extraction cache - skip unchanged files on re-run
 from __future__ import annotations
 

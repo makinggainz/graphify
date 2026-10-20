@@ -1,3 +1,5 @@
+> **Unofficial fork.** This is graphify v0.9.92 plus two fixes for Swift code ([#4574](https://github.com/Graphify-Labs/graphify/issues/4574), [#4575](https://github.com/Graphify-Labs/graphify/issues/4575)). It is not affiliated with Graphify Labs. See [FORK.md](FORK.md) for what changed and how to install it. The official project is at [Graphify-Labs/graphify](https://github.com/Graphify-Labs/graphify).
+
 <p align="center">
   <a href="https://graphify.com"><img src="https://raw.githubusercontent.com/Graphify-Labs/graphify/v8/docs/graphify-logo.png" width="360" height="189" alt="Graphify"/></a>
 </p>

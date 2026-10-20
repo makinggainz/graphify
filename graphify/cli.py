@@ -1,3 +1,4 @@
+# Modified in the makinggainz/graphify fork, 2026-10-19 (carries the `_swift_extension_only` marker); see FORK.md.
 """graphify command dispatch — every non-install subcommand.
 
 Extracted verbatim from __main__.main(); __main__ now calls dispatch_command(cmd)

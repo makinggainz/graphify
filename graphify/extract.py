@@ -1,3 +1,4 @@
+# Modified in the makinggainz/graphify fork, 2026-10-19 (Swift extension-only nodes are not rewire targets); see FORK.md.
 """Deterministic structural extraction from source code using tree-sitter. Outputs nodes+edges dicts."""
 from __future__ import annotations
 

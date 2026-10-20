@@ -1,3 +1,4 @@
+# Modified in the makinggainz/graphify fork, 2026-10-19 (carries the `_swift_extension_only` marker); see FORK.md.
 # monitor a folder and auto-trigger --update when files change
 from __future__ import annotations
 import contextlib

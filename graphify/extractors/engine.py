@@ -1,3 +1,4 @@
+# Modified in the makinggainz/graphify fork, 2026-10-19 (Swift nested-type ids and extension `declared` records); see FORK.md.
 """engine — moved verbatim from graphify/extract.py."""
 from __future__ import annotations
 
