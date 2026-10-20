@@ -1408,6 +1408,91 @@ def _swift_pre_scan(root_node, source: bytes) -> tuple[set[str], set[str]]:
         stack.extend(n.children)
     return protocols, classes
 
+def _swift_type_decl_name(node, source: bytes, config: LanguageConfig) -> str | None:
+    """Read a Swift type declaration's name the way the generic class walk does."""
+    name_node = node.child_by_field_name(config.name_field)
+    if name_node is None:
+        for child in node.children:
+            if child.type in config.name_fallback_child_types:
+                name_node = child
+                break
+    return _read_text(name_node, source) if name_node is not None else None
+
+_SWIFT_MEMBER_DECLARATIONS = frozenset({
+    "function_declaration", "property_declaration", "enum_entry", "init_declaration",
+})
+_SWIFT_MEMBER_NAME_NODES = frozenset({"simple_identifier", "pattern", "init"})
+
+def _swift_pre_scan_nested_types(root_node, source: bytes, stem: str,
+                                 config: LanguageConfig) -> tuple[set[str], dict[str, str]]:
+    """Return the ids of the Swift types declared inside another type's body.
+
+    A nested type's id carries its enclosing type's id, so two `enum CodingKeys`
+    in one file stay two nodes (#4575). Swift lets a type body name a nested type
+    before declaring it, so the walk needs these ids before it reaches them.
+    Mirrors the walk: a type counts as nested only when it sits directly in its
+    parent's body or under a parse ERROR there; any other wrapper is a scope
+    boundary for the walk too.
+
+    That plain id has the same shape as a member's (`_make_id(parent, name)`,
+    case-folded), so `struct Crime` beside `func crime()` would share one node.
+    Members keep the plain id; a nested type that collides with a member of the
+    same parent (across every body sharing the parent's id, so a same-file
+    `extension` counts) takes a name-hash salt, the `_underscore_salted_nid`
+    scheme. Returns (nested type ids, {plain id: salted id}).
+    """
+    nested: set[str] = set()
+    salted: dict[str, str] = {}
+
+    def body_items(container):
+        for child in container.children:
+            if child.type == "ERROR":
+                yield from body_items(child)
+            else:
+                yield child
+
+    def visit(nid: str, decls: list) -> None:
+        bodies = [b for b in (_find_body(d, config) for d in decls) if b is not None]
+        members: set[str] = set()
+        inner: list[tuple[str, object]] = []
+        for body in bodies:
+            for child in body_items(body):
+                if child.type in config.class_types:
+                    name = _swift_type_decl_name(child, source, config)
+                    if name:
+                        inner.append((name, child))
+                elif child.type in _SWIFT_MEMBER_DECLARATIONS:
+                    for name_node in child.children_by_field_name("name"):
+                        if name_node.type in _SWIFT_MEMBER_NAME_NODES:
+                            text = _read_text(name_node, source)
+                            if text:
+                                members.add(_make_id(nid, text))
+        children: dict[str, list] = {}
+        for name, child in inner:
+            child_nid = _make_id(nid, name)
+            if child_nid in members:
+                salt = hashlib.sha1(name.encode("utf-8"), usedforsecurity=False).hexdigest()[:6]
+                salted[child_nid] = _make_id(child_nid, salt)
+                child_nid = salted[child_nid]
+            nested.add(child_nid)
+            children.setdefault(child_nid, []).append(child)
+        for child_nid, child_decls in children.items():
+            visit(child_nid, child_decls)
+
+    top_level: dict[str, list] = {}
+    stack = [root_node]
+    while stack:
+        n = stack.pop()
+        if n.type in config.class_types:
+            name = _swift_type_decl_name(n, source, config)
+            if name:
+                top_level.setdefault(_make_id(stem, name), []).append(n)
+            continue
+        stack.extend(n.children)
+    for nid, decls in top_level.items():
+        visit(nid, decls)
+    return nested, salted
+
 def _swift_classify_base(name: str, kind: str | None, is_first: bool,
                           protocols: set[str], classes: set[str]) -> str:
     """Classify a Swift inheritance_specifier entry as `inherits` or `implements`."""
@@ -5900,8 +5985,16 @@ def _extract_generic(
 
     swift_protocol_names: set[str] = set()
     swift_class_names: set[str] = set()
+    swift_nested_type_ids: set[str] = set()
+    swift_nested_salted: dict[str, str] = {}
     if config.ts_module == "tree_sitter_swift":
         swift_protocol_names, swift_class_names = _swift_pre_scan(root, source)
+        swift_nested_type_ids, swift_nested_salted = _swift_pre_scan_nested_types(
+            root, source, stem, config)
+    # Swift: ids of the types whose bodies the walk is inside (innermost last),
+    # and the not-yet-declared nested types a bare reference was bound to.
+    swift_type_scope: list[str] = []
+    swift_forward_nested_refs: dict[str, str] = {}
 
     # JS/TS class body -> member collision groups, filled lazily (#4475).
     js_member_groups: dict = {}
@@ -5953,6 +6046,17 @@ def _extract_generic(
         edges.append(edge)
 
     def ensure_named_node(name: str, line: int) -> str:
+        # Swift: a bare type name inside a type body means the nearest enclosing
+        # type's nested type of that name, even one declared further down
+        # (#4575). Only pre-scanned nested type ids qualify, so a same-slug
+        # method id can never be taken for a type.
+        for enclosing in reversed(swift_type_scope):
+            scoped = _make_id(enclosing, name)
+            scoped = swift_nested_salted.get(scoped, scoped)
+            if scoped in swift_nested_type_ids:
+                if scoped not in seen_ids:
+                    swift_forward_nested_refs[scoped] = name
+                return scoped
         nid = _make_id(stem, ".".join(namespace_stack), name)
         if config.ts_module == "tree_sitter_c_sharp":
             nid = _underscore_salted_nid(nid, name, csharp_type_groups)
@@ -6109,8 +6213,12 @@ def _extract_generic(
             if config.ts_module == "tree_sitter_c_sharp":
                 # `Pair` / `_Pair` in one file share an id otherwise (#4415).
                 class_nid = _underscore_salted_nid(class_nid, class_name, csharp_type_groups)
-            if config.ts_module == "tree_sitter_python" and parent_class_nid:
+            if parent_class_nid and config.ts_module in ("tree_sitter_python", "tree_sitter_swift"):
+                # A nested type is named by its enclosing type, so same-named
+                # nested types (Swift's per-struct `CodingKeys`) stay apart (#4220, #4575).
                 class_nid = _make_id(parent_class_nid, class_name)
+                # Swift: salted when it would share a member's id (`Crime` / `crime()`).
+                class_nid = swift_nested_salted.get(class_nid, class_nid)
             elif config.ts_module == "tree_sitter_python":
                 # `Session` / `session()`, `Foo` / `FOO` in one module (#2810).
                 class_nid = _underscore_salted_nid(class_nid, class_name, python_underscore_groups)
@@ -6928,6 +7036,8 @@ def _extract_generic(
                 ruby_namespace.extend(ruby_segments)
                 if config.ts_module == "tree_sitter_ruby":
                     ruby_lexical_scopes.append(class_name)
+                if config.ts_module == "tree_sitter_swift":
+                    swift_type_scope.append(class_nid)
                 previous_singleton_depth = ruby_singleton_context_depth
                 if config.ts_module == "tree_sitter_ruby":
                     ruby_singleton_context_depth = 0
@@ -6938,6 +7048,8 @@ def _extract_generic(
                     ruby_singleton_context_depth = previous_singleton_depth
                     if config.ts_module == "tree_sitter_ruby":
                         ruby_lexical_scopes.pop()
+                    if config.ts_module == "tree_sitter_swift":
+                        swift_type_scope.pop()
                     if ruby_segments:
                         del ruby_namespace[-len(ruby_segments):]
             return
@@ -8350,6 +8462,18 @@ def _extract_generic(
                 edge["target"] = local_nid
         nodes[:] = [n for n in nodes if not (n["id"] == stub_nid and not n["source_file"])]
         seen_ids.discard(stub_nid)
+
+    # Swift (#4575): a forward reference bound to a pre-scanned nested type the
+    # walk then never minted (the pre-scan and the walk disagreed on its scope)
+    # falls back to the plain lookup, so no edge points at a missing node.
+    missing_nested = {nid: name for nid, name in swift_forward_nested_refs.items()
+                      if nid not in seen_ids}
+    if missing_nested:
+        fallback = {nid: ensure_named_node(name, 0) for nid, name in missing_nested.items()}
+        for edge in edges:
+            for end in ("source", "target"):
+                if edge.get(end) in fallback:
+                    edge[end] = fallback[edge[end]]
 
     # ── Call-graph pass ───────────────────────────────────────────────────────
     label_to_nid: dict[str, str] = {}     # case-sensitive (Ruby, C#, Java, Kotlin, etc.)
